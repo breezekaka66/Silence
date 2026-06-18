@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments (uv)
+.venv/
+venv/
+env/
+ENV/
+
+# uv
+uv.lock
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# PyInstaller
+*.spec
+dist_exe/
+
+# AI Models (large binary files - download separately)
+silence/models/*.onnx
+silence/models/*.bin
+silence/models/*.pt
+silence/models/*.pth
+!silence/models/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+*.sublime-project
+*.sublime-workspace
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Config (user-specific settings)
+config.json
+user_config.json
+
+# Temporary audio files
+*.wav
+*.mp3
+*.flac
+temp_audio/
+
+# Test outputs
+test_output/
