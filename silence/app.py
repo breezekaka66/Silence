@@ -36,9 +36,17 @@ class SilenceApp(QApplication):
         # Load config
         self.config = Config()
 
-        # Check VB-Cable
+        # Check VB-Cable and auto-set output device index
         vbcable_ok = check_vbcable()
-        if not vbcable_ok:
+        if vbcable_ok:
+            from silence.utils.vbcable_check import find_vbcable_input_index
+            cable_in_idx = find_vbcable_input_index()
+            if cable_in_idx is not None and self.config.output_device_index is None:
+                # Auto-set on first run
+                self.config.output_device_index = cable_in_idx
+                self.config.save()
+                logger.info(f"Auto-set VB-Cable output device index: {cable_in_idx}")
+        else:
             logger.warning("VB-Cable not detected. Virtual microphone output disabled.")
 
         # Create audio pipeline (not started yet)

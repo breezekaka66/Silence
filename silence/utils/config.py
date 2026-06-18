@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 DEFAULTS: dict[str, Any] = {
     # Audio devices
     "input_device_index": None,   # None = system default microphone
-    "output_device_index": None,  # None = system default output (use VB-Cable index)
+    "output_device_index": None,  # None = auto-detect CABLE Input (VB-Audio)
     "input_device_name": "Default Microphone",
     "output_device_name": "CABLE Input (VB-Audio Virtual Cable)",
 
