@@ -1,31 +1,53 @@
-# Silence — Pinned Dependencies (auto-generated)
-# Install with: uv pip install -r requirements.txt
-# Or use uv sync for development (recommended)
+# Silence — Pinned Runtime Dependencies
+# Generated: 2026-06-18 | Python 3.10.11 | Windows
 #
-# Generated from: uv pip freeze (Python 3.10.11)
+# Install (recommended):
+#   uv pip install -r requirements.txt
+#
+# PyTorch CUDA 12.1 is included — requires compatible NVIDIA driver.
+# If you don't have an NVIDIA GPU, replace torch lines with CPU versions:
+#   torch==2.5.1+cpu  (from https://download.pytorch.org/whl/cpu)
 
+# AI / ML
+deepfilterlib==0.5.6
+deepfilternet==0.5.6
+torch==2.5.1+cu121
+torchaudio==2.5.1+cu121
+
+# Audio I/O
+sounddevice==0.5.5
+soundfile==0.14.0
+
+# Numerical
+numpy==1.26.4
+sympy==1.13.1
+mpmath==1.3.0
+
+# GUI
+pyside6==6.11.1
+pyside6-addons==6.11.1
+pyside6-essentials==6.11.1
+shiboken6==6.11.1
+
+# PyTorch internals
+filelock==3.29.0
+fsspec==2026.4.0
+jinja2==3.1.6
+markupsafe==3.0.3
+networkx==3.4.2
+
+# Utilities
 appdirs==1.4.4
 certifi==2026.6.17
 cffi==2.0.0
 charset-normalizer==3.4.7
 colorama==0.4.6
-deepfilterlib==0.5.6
-deepfilternet==0.5.6
 idna==3.18
 loguru==0.7.3
-mpmath==1.3.0
-numpy==1.26.4
 packaging==23.2
 psutil==7.2.2
 pycparser==3.0
-pyside6==6.11.1
-pyside6-addons==6.11.1
-pyside6-essentials==6.11.1
 requests==2.34.2
-shiboken6==6.11.1
-sounddevice==0.5.5
-soundfile==0.14.0
-sympy==1.14.0
 tomli==2.4.1
 typing-extensions==4.15.0
 urllib3==2.7.0
