@@ -218,9 +218,12 @@ class MainWindow(QMainWindow):
         self._pipeline.on_vu_update = self._on_vu_update
         self._pipeline.on_latency_update = self._on_latency_update
 
-        # Status refresh timer
+        # Cached latency from inference thread (read by main thread timer)
+        self._last_latency_ms: float = 0.0
+
+        # Status refresh timer (reads _last_latency_ms set by inference thread)
         self._status_timer = QTimer(self)
-        self._status_timer.setInterval(500)
+        self._status_timer.setInterval(250)   # 4 Hz is plenty for latency display
         self._status_timer.timeout.connect(self._refresh_status)
         self._status_timer.start()
 
@@ -480,18 +483,19 @@ class MainWindow(QMainWindow):
         self._config.start_on_boot = checked
         self._config.save()
 
-    def _on_vu_update(self, rms_db: float, peak_db: float):
-        """Called from audio thread — just store values, widget polls them."""
-        if hasattr(self, "_vu_widget"):
-            self._vu_widget.update_level(rms_db, peak_db)
+    def _on_vu_update(self, rms_db: float, peak_db: float) -> None:
+        """Called from PortAudio thread. Only stores float values — GIL-safe."""
+        # Guard against being called after window is destroyed
+        vu = getattr(self, "_vu_widget", None)
+        if vu is not None:
+            vu.update_level(rms_db, peak_db)
 
-    def _on_latency_update(self, latency_ms: float):
-        """Called from inference thread — update label via Qt-safe method."""
-        # Use invokeMethod or just let the timer pick it up
+    def _on_latency_update(self, latency_ms: float) -> None:
+        """Called from inference thread. Stores float — GIL-safe atomic write."""
         self._last_latency_ms = latency_ms
 
-    def _refresh_status(self):
-        """Periodic UI refresh from Qt main thread."""
+    def _refresh_status(self) -> None:
+        """Periodic UI refresh, called from Qt main thread (QTimer)."""
         active = self._pipeline.is_running
 
         if active:
@@ -501,10 +505,10 @@ class MainWindow(QMainWindow):
             self._status_label.setText("● Inactive")
             self._status_label.setObjectName("status_inactive")
 
-        # Latency
-        if active and hasattr(self, "_last_latency_ms"):
-            self._latency_label.setText(f"{self._last_latency_ms:.1f} ms")
-        else:
+        # Show end-to-end latency estimate
+        if active and self._last_latency_ms > 0:
+            self._latency_label.setText(f"{self._last_latency_ms:.0f} ms")
+        elif not active:
             self._latency_label.setText("— ms")
 
         # Re-apply stylesheet for dynamic objectName changes
@@ -523,10 +527,13 @@ class MainWindow(QMainWindow):
         self._toggle_btn.style().unpolish(self._toggle_btn)
         self._toggle_btn.style().polish(self._toggle_btn)
 
-    def closeEvent(self, event):
-        """Don't quit the app when settings window closes."""
-        # Remove callbacks to avoid dead references
-        self._pipeline.on_vu_update = None
-        self._pipeline.on_latency_update = None
+    def closeEvent(self, event) -> None:
+        """Window close: detach callbacks and stop timer to break all references."""
+        # Stop timer FIRST so it cannot fire after widgets are destroyed
         self._status_timer.stop()
+
+        # Detach pipeline callbacks (assignment is GIL-atomic)
+        self._pipeline.on_vu_update      = None
+        self._pipeline.on_latency_update = None
+
         event.accept()

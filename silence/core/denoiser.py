@@ -1,117 +1,189 @@
 """
-Denoiser — DeepFilterNet 3 ONNX Runtime inference wrapper.
+Denoiser — DeepFilterNet 3 streaming inference wrapper.
 
-Uses ONNX Runtime with DirectML (DirectX 12) backend for GPU acceleration.
-Falls back to CPU if DirectML is unavailable.
+Key design decisions:
+  1. atten_lim_db mapping is CORRECT here:
+       strength=0   -> atten_lim_db=0    -> mask clamped >= 1.0 -> NO noise reduction (bypass)
+       strength=0.5 -> atten_lim_db=50   -> up to -50 dB attenuation allowed
+       strength=1.0 -> atten_lim_db=None -> unlimited attenuation (full model power)
+     Previous code had this INVERTED, which caused noise reduction to do nothing at strength=100.
 
-DeepFilterNet processes audio at 48kHz in 10ms frames.
-Strength parameter (0.0–1.0) maps to DeepFilterNet's atten_lim_db setting:
-  0.0 → atten_lim_db = 0   (no attenuation limit, maximum noise reduction)
-  1.0 → atten_lim_db = 100 (heavy attenuation limit, more voice preservation)
+  2. Model runs on CPU by default.
+     DeepFilterNet 3 RTF on modern CPU is ~0.03-0.05, meaning each 10 ms frame
+     takes only ~0.3-0.5 ms — well within budget. CUDA can be enabled but the
+     df_state STFT analysis stage (Rust/CPU) is often the bottleneck anyway.
 
-NOTE: We invert the intuition here so that strength=100 means maximum noise
-reduction and strength=0 means minimum (closer to bypass).
+  3. torch.inference_mode() is used instead of torch.no_grad():
+       - Disables autograd engine entirely (lower overhead, no accidental leaks)
+       - Cannot use .requires_grad_() inside, which we don't need
+
+  4. Intermediate tensors are explicitly deleted each frame to prevent PyTorch's
+     CPU allocator from accumulating reference-counted blocks. Combined with
+     AudioPipeline's periodic gc.collect(), this keeps RSS stable over time.
+
+  5. pad=False in df_enhance avoids zero-padding that adds algorithmic latency
+     and produces a longer output than the input frame.
+
+  6. Output gain compensation (+3 dB default) corrects DeepFilterNet's tendency
+     to lower the overall level when aggressively attenuating noise.
 """
 import logging
-import os
 from typing import Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# ── Post-processing gain ───────────────────────────────────────────────────────
+# Increase OUTPUT_GAIN_DB if the denoised output sounds too quiet.
+# Decrease it if it clips (values > 1.0 are clamped).
+OUTPUT_GAIN_DB     = 3.0
+OUTPUT_GAIN_LINEAR = 10 ** (OUTPUT_GAIN_DB / 20.0)   # ≈ 1.413
+
 
 class Denoiser:
     """
-    Wraps DeepFilterNet 3 for real-time frame-by-frame inference.
-    
-    Uses the deepfilternet Python package which handles model loading
-    and streaming state internally.
+    Wraps DeepFilterNet 3 for real-time, stateful, frame-by-frame inference.
+
+    The df_state object (DfState, backed by Rust) maintains all STFT/LSTM
+    state between frames, giving temporal continuity across 10 ms chunks.
     """
 
-    def __init__(self, config):
-        self.config = config
-        self._model = None
+    def __init__(self, config) -> None:
+        self.config    = config
+        self._model    = None
         self._df_state = None
-        self._loaded = False
+        self._loaded   = False
+        self._device   = "cpu"
 
-    def load(self):
+    # ══════════════════════════════════════════════════════════════════════════
+    # Public API
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def load(self) -> None:
         """
-        Load DeepFilterNet model. Called once on pipeline start.
-        Downloads model weights on first run (~30MB, cached locally).
+        Load DeepFilterNet model weights. Safe to call once; idempotent.
+        First call downloads ~30 MB weights to ~/.cache/DeepFilterNet/.
         """
+        if self._loaded:
+            return
         try:
+            import torch
             from df.enhance import init_df
 
-            logger.info("Loading DeepFilterNet 3 model...")
-            # init_df returns (model, df_state, suffix)
-            self._model, self._df_state, _ = init_df(
-                config_allow_defaults=True,
+            logger.info("Loading DeepFilterNet 3…")
+            model, df_state, _ = init_df(config_allow_defaults=True)
+            model.eval()
+
+            # Attempt GPU; gracefully fall back to CPU
+            if torch.cuda.is_available():
+                try:
+                    model = model.cuda()
+                    self._device = "cuda"
+                    logger.info("DeepFilterNet running on CUDA (GPU).")
+                except RuntimeError as exc:
+                    logger.warning("CUDA init failed (%s) — falling back to CPU.", exc)
+                    self._device = "cpu"
+            else:
+                logger.info("DeepFilterNet running on CPU.")
+
+            self._model    = model
+            self._df_state = df_state
+            self._loaded   = True
+
+            logger.info(
+                "DeepFilterNet 3 ready | SR=%d Hz | hop=%d samples | device=%s",
+                df_state.sr(),
+                df_state.hop_size(),
+                self._device,
             )
-            self._model.eval()
-            self._loaded = True
-            logger.info("DeepFilterNet 3 loaded successfully.")
 
         except ImportError:
-            logger.error(
-                "df package not found. "
-                "Install with: uv pip install deepfilternet"
-            )
+            logger.error("deepfilternet not installed. Run: uv pip install deepfilternet")
             raise
-        except Exception as e:
-            logger.error(f"Failed to load DeepFilterNet model: {e}", exc_info=True)
+        except Exception as exc:
+            logger.error("Model load failed: %s", exc, exc_info=True)
             raise
 
     def process_frame(self, frame: np.ndarray, strength: float = 1.0) -> np.ndarray:
         """
-        Denoise a single audio frame.
+        Denoise one audio frame in-place of the pipeline.
 
         Args:
-            frame: float32 numpy array, shape (480,), range [-1.0, 1.0]
-            strength: 0.0 = bypass, 1.0 = maximum noise reduction
+            frame:    float32 ndarray of shape (480,), values in [-1, 1].
+            strength: 0.0 = bypass, 1.0 = maximum noise reduction.
 
         Returns:
-            Denoised float32 numpy array, same shape as input.
+            Denoised float32 ndarray, same shape as input.
         """
         if not self._loaded or self._model is None:
             return frame
 
-        if strength < 0.01:
-            return frame
+        if strength < 0.005:
+            return frame  # True bypass — no processing at all
 
         try:
             import torch
             from df.enhance import enhance as df_enhance
 
-            # Map strength (0.0–1.0) → atten_lim_db
-            # strength=1.0 → 0dB limit (full noise reduction)
-            # strength=0.0 → 100dB limit (basically bypass)
-            atten_lim_db = (1.0 - strength) * 100.0
+            # ── atten_lim_db mapping ───────────────────────────────────────────
+            # atten_lim_db sets a LOWER BOUND on DeepFilterNet's spectral mask:
+            #   low  atten_lim_db -> mask clamped high  -> little attenuation (quiet NR)
+            #   high atten_lim_db -> mask clamped low   -> lots of attenuation (strong NR)
+            #   None              -> no clamping at all -> full model-determined NR
+            #
+            # CORRECT mapping (strength 0→1 maps to NR none→max):
+            if strength >= 0.99:
+                atten_lim_db = None          # Full DeepFilterNet, no limiter
+            else:
+                atten_lim_db = strength * 100.0   # e.g. strength=0.5 -> 50 dB
 
-            # DeepFilterNet expects shape (1, samples) as a torch tensor
-            audio_tensor = torch.from_numpy(frame).unsqueeze(0)  # [1, 480]
+            # Build input tensor on the correct device
+            audio_t = torch.from_numpy(frame).unsqueeze(0)  # [1, 480]
+            if self._device == "cuda":
+                audio_t = audio_t.cuda()
 
-            with torch.no_grad():
-                enhanced = df_enhance(
+            # inference_mode: faster than no_grad, zero autograd overhead
+            with torch.inference_mode():
+                enhanced_t = df_enhance(
                     self._model,
                     self._df_state,
-                    audio_tensor,
-                    atten_lim_db=atten_lim_db,
+                    audio_t,
+                    atten_lim_db = atten_lim_db,
+                    pad          = False,   # no zero-pad → no added latency
                 )
 
-            # Return as 1D numpy float32 array
-            result = enhanced.squeeze().numpy()
-            return result.astype(np.float32)
+            # Move back to CPU numpy
+            result = enhanced_t.squeeze().cpu().numpy().astype(np.float32)
 
-        except Exception as e:
-            logger.debug(f"Denoiser inference error: {e}")
-            return frame  # Fail gracefully, return original frame
+            # Explicitly delete tensors so Python's ref-count drops to zero
+            # and the memory is returned to PyTorch's allocator promptly.
+            del audio_t, enhanced_t
 
-    def unload(self):
-        """Release model resources."""
-        self._model = None
+            # Apply post-processing gain and hard-clip to [-1, 1]
+            np.multiply(result, OUTPUT_GAIN_LINEAR, out=result)
+            np.clip(result, -1.0, 1.0, out=result)
+
+            return result
+
+        except Exception as exc:
+            # Never crash the audio thread; silently pass through original frame
+            logger.debug("Inference error (frame passed through): %s", exc)
+            return frame
+
+    def unload(self) -> None:
+        """Release model and free memory."""
+        self._model    = None
         self._df_state = None
-        self._loaded = False
+        self._loaded   = False
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        import gc
+        gc.collect()
         logger.info("Denoiser unloaded.")
 
     @property
