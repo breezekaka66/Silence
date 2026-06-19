@@ -167,6 +167,20 @@ QFrame#separator {
     background-color: #1F2937;
     border-top: 1px solid #374151;
 }
+QPushButton#btn_quit {
+    background-color: transparent;
+    color: #6B7280;
+    border: 1px solid #374151;
+    border-radius: 8px;
+    padding: 6px 16px;
+    font-size: 12px;
+    min-width: 100px;
+}
+QPushButton#btn_quit:hover {
+    background-color: #1F2937;
+    color: #EF4444;
+    border-color: #EF4444;
+}
 """
 
 
@@ -181,10 +195,11 @@ def _separator() -> QFrame:
 class MainWindow(QMainWindow):
     """Silence settings and status window."""
 
-    def __init__(self, pipeline: AudioPipeline, config: Config, parent=None):
+    def __init__(self, pipeline: AudioPipeline, config: Config, tray=None, parent=None):
         super().__init__(parent)
         self._pipeline = pipeline
         self._config = config
+        self._tray = tray  # SilenceTrayIcon ref for minimize hint (optional)
 
         self.setWindowTitle("Silence — Settings")
         self.setFixedWidth(420)
@@ -382,7 +397,7 @@ class MainWindow(QMainWindow):
         self._update_toggle_button()
         layout.addWidget(self._toggle_btn)
 
-        # Checkboxes row
+        # Checkboxes + VB-Cable status row
         checks = QHBoxLayout()
 
         self._boot_check = QCheckBox("Start on boot")
@@ -393,11 +408,22 @@ class MainWindow(QMainWindow):
         checks.addStretch()
 
         vbcable_ok = check_vbcable()
-        vb_lbl = QLabel("VB-Cable: " + ("✅ Installed" if vbcable_ok else "❌ Not found"))
+        vb_lbl = QLabel("VB-Cable: " + ("\u2705 Installed" if vbcable_ok else "\u274c Not found"))
         vb_lbl.setObjectName("subtitle")
         checks.addWidget(vb_lbl)
 
         layout.addLayout(checks)
+
+        # Quit button — clearly labelled so user knows how to exit
+        quit_row = QHBoxLayout()
+        quit_row.addStretch()
+        quit_btn = QPushButton("\u2715  Quit Silence")
+        quit_btn.setObjectName("btn_quit")
+        quit_btn.setToolTip("Stop noise suppression and exit completely")
+        quit_btn.clicked.connect(self._on_quit)
+        quit_row.addWidget(quit_btn)
+        layout.addLayout(quit_row)
+
         return w
 
     # -------------------------------------------------------------------------
@@ -479,9 +505,16 @@ class MainWindow(QMainWindow):
         self._config.save()
         self._update_toggle_button()
 
-    def _on_boot_toggled(self, checked: bool):
+    def _on_boot_toggled(self, checked: bool) -> None:
         self._config.start_on_boot = checked
         self._config.save()
+
+    def _on_quit(self) -> None:
+        """Stop pipeline and exit the application completely."""
+        self._pipeline.stop()
+        self._config.save()
+        from PySide6.QtWidgets import QApplication
+        QApplication.quit()
 
     def _on_vu_update(self, rms_db: float, peak_db: float) -> None:
         """Called from PortAudio thread. Only stores float values — GIL-safe."""
@@ -528,7 +561,7 @@ class MainWindow(QMainWindow):
         self._toggle_btn.style().polish(self._toggle_btn)
 
     def closeEvent(self, event) -> None:
-        """Window close: detach callbacks and stop timer to break all references."""
+        """X button: hide to tray (app keeps running). Show hint on first close."""
         # Stop timer FIRST so it cannot fire after widgets are destroyed
         self._status_timer.stop()
 
@@ -536,4 +569,9 @@ class MainWindow(QMainWindow):
         self._pipeline.on_vu_update      = None
         self._pipeline.on_latency_update = None
 
-        event.accept()
+        event.accept()  # Accept = hide window; app stays alive in tray
+
+        # Show one-shot balloon so user knows how to fully quit
+        if self._tray is not None:
+            self._tray.show_minimize_hint()
+

@@ -68,12 +68,14 @@ class SilenceTrayIcon(QSystemTrayIcon):
         self._build_menu()
         self.setContextMenu(self._menu)
 
-        # Left-click opens settings
+        # Left-click / double-click opens settings
         self.activated.connect(self._on_activated)
+
+        # Track whether we've shown the 'minimized to tray' hint yet (one-shot)
+        self._tray_hint_shown: bool = False
 
         # Auto-start if configured
         if self._config.enabled:
-            # Delay start slightly so Qt event loop is ready
             QTimer.singleShot(500, self._start_pipeline)
 
     # -------------------------------------------------------------------------
@@ -122,9 +124,12 @@ class SilenceTrayIcon(QSystemTrayIcon):
     # Slots
     # -------------------------------------------------------------------------
 
-    def _on_activated(self, reason: QSystemTrayIcon.ActivationReason):
+    def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         """Handle tray icon click."""
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,       # single left-click
+            QSystemTrayIcon.ActivationReason.DoubleClick,   # double left-click
+        ):
             self._open_settings()
 
     def _on_toggle(self):
@@ -162,19 +167,34 @@ class SilenceTrayIcon(QSystemTrayIcon):
                 3000,
             )
 
-    def _open_settings(self):
+    def _open_settings(self) -> None:
         """Open or focus the settings window."""
         from silence.gui.main_window import MainWindow
         if self._settings_window is None or not self._settings_window.isVisible():
-            self._settings_window = MainWindow(self._pipeline, self._config)
+            self._settings_window = MainWindow(
+                self._pipeline, self._config, tray=self
+            )
             self._settings_window.show()
         else:
             self._settings_window.raise_()
             self._settings_window.activateWindow()
 
-    def _on_quit(self):
+    def _on_quit(self) -> None:
         """Stop pipeline and exit the application."""
         self._pipeline.stop()
         self._config.save()
         from PySide6.QtWidgets import QApplication
         QApplication.quit()
+
+    def show_minimize_hint(self) -> None:
+        """Show a one-shot balloon telling the user the app is still in the tray."""
+        if self._tray_hint_shown:
+            return
+        self._tray_hint_shown = True
+        self.showMessage(
+            "Silence is still running",
+            "Silence continues running in the background.\n"
+            "Right-click the tray icon or use \"\u2715 Quit Silence\" to exit completely.",
+            QSystemTrayIcon.MessageIcon.Information,
+            4000,   # ms
+        )
